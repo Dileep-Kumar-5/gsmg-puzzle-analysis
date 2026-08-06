@@ -212,6 +212,39 @@ The length coincidences are real but unexploited:
 `91 = 7×13` and `len("matrixsumlist") = 13`;
 `570 = 15×38` and `len("lastwordsbeforearchichoice"+"thispassword") = 38`.
 
+### Proven complete: no number-base reading works
+
+`RUN1`/`RUN2` decode as *symbols → decimal integer → base 16 → ASCII*. That
+method pins its own output length: 63 symbols → 26 chars and 29 → 12, a ratio of
+2.42, which is just `log(10)/log(16)`. `dbbi`'s 91 symbols do produce 38 bytes
+under every mapping. So the *encoding* is right and only the symbol→digit
+assignment is unknown — and that space is finite.
+
+`permute.py` and `permute9.py` exhaust it:
+
+| run | base | mappings | best lowercase ratio |
+|---|---|---|---|
+| `dbbi` | 10 (from `1..9`, then any 9 of `0..9`) | 3,991,680 | 0.395 |
+| `dbbi` | 9 | 362,880 | 0.417 |
+| `faed` | 10 | 3,991,680 | 0.211 |
+| `faed` | 9 | 362,880 | 0.208 |
+
+**8,709,120 mappings, both bases, both runs.** A correct mapping scores 1.00 —
+`RUN1` and `RUN2` are re-derived as a positive control in the same run and do
+score 1.00. Nothing comes close.
+
+This is exhaustion, not sampling. **No positional number-base reading of `dbbi`
+or `faed` yields ASCII text under any symbol→digit assignment.** Despite sharing
+the `{a..i}` alphabet and the same textarea, they are not the same kind of
+object as `RUN1`/`RUN2` — which is a structural fact about the puzzle, not a
+failed attempt.
+
+Also eliminated in passing: `dbbi` read as a literal "matrix sum list"
+(`dbbi2.py` — both 7×13 rectangles, row/column sums, row- and column-major fill,
+a1z26); and each symbol in turn standing in for the missing zero
+(`zeroout.py` — 90 assignments per run, single and paired, keep-value and
+re-ranked).
+
 ---
 
 ## Password search: ~38.5M trials, all negative
