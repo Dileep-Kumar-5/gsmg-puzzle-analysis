@@ -323,6 +323,56 @@ derivation. The key exists only as plaintext inside a blob.
 
 ---
 
+## The yin-yang phase, and a dependency cycle
+
+The creator's statements constrain what the unreached phase is:
+
+| statement | implication |
+|---|---|
+| "internet not required to solve, only to claim" (2023-11) | **not a hosted page** — built offline from data in hand |
+| "you'll solve it the same day" / "2 hours max" (2023, 2025) | **recognisable on sight** |
+| it is the 4th ingredient in the 2023 recipe | it yields a **string**, not just a milestone |
+
+Recognisable-on-sight plus offline-constructible fits this creator's signature
+move exactly: *render data as a picture, read the picture*. He has done it
+twice — phase 1 is a bitmap read as bits, and the Decentraland hint is an audio
+file whose spectrogram draws `HASHTHETEXT`. A yin-yang is a shape.
+
+`bitmaps.py` tests that directly: every run laid out at every width its length
+admits, binarised 20 ways, scored by vertical continuity (in a drawing a pixel
+matches the one above it; in noise it does not), each against a shuffled control
+swept over the same number of layouts.
+
+```
+faed  best +0.0672   control ceiling +0.0397   (110 layouts each)
+dbbi  best +0.1421   control ceiling +0.1284   — does not beat control
+RUN0  no usable widths (661 is prime)
+```
+
+`faed`'s top layout clears the threshold numerically, so it is printed in full
+— and it is visibly noise. A real drawing scores well above 0.10 and is
+unmistakable at a glance. Neither object renders as an image.
+
+`duality.py` likewise rules out the most concrete "half and better half"
+reading: the two ciphertexts of exactly 80 bytes (the SalPhaseIon blob and the
+one trailing the phase 3.2 plaintext) are unrelated. Their XOR has entropy 6.037
+bits/byte — which is *exactly* random for an 80-byte sample, since 80 bytes can
+hold at most 80 distinct values — one zero byte where chance predicts one, and
+no derived 32-byte quantity matches the prize key.
+
+**The cycle.** Every route to yin-yang traced so far runs back through the
+Cosmic plaintext, and the Cosmic key runs through yin-yang:
+
+```
+Cosmic plaintext <- Cosmic key <- yin-yang <- ? -> (only large source is the Cosmic plaintext)
+```
+
+As publicly known, the puzzle is not in a solvable state. Some input breaks the
+cycle and has not been recognised as one — which is what *"it's in front of your
+eyes but you're not seeing it"* would mean operationally. Everything currently
+identified as in-the-clear (`dbbi`, `faed`, the grid, the colours, the images)
+is now measured, and none of it is that input.
+
 ## Method notes
 
 Two things did most of the work and are worth reusing:

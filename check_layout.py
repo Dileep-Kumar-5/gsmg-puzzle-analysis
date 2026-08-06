@@ -1,159 +1,171 @@
 #!/usr/bin/env python3
-"""Static consistency check for the 256-bit distance patch.
+"""Static consistency check for the configurable distance-width patch.
 
-Phase 2 is mostly hand-edited offsets across the CUDA kernel, the host readout
-and two wire formats. A compiler catches type errors; it does NOT catch a DP
-written at word 9 and read at word 8. This parses the actual sources and
-asserts producer and consumer agree.
+The width is a compile-time switch (DIST_WORDS = 2 by default, 4 with
+WIDE_DIST), and most of the affected code is hand-written offsets across the
+CUDA kernel, the host readout and two wire formats. A compiler catches type
+errors; it does NOT catch a DP written at word 9 and read at word 8, and it
+only ever checks the width you happened to build. This parses the sources and
+asserts producer and consumer agree at BOTH widths.
 """
 
 import re
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).parent / "Kangaroo"
+_here = Path(__file__).resolve().parent
+ROOT = _here.parent if (_here.parent / "HashTable.h").exists() else _here.parent / "Kangaroo"
+
+WIDTHS = (2, 4)
 
 
 def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8", errors="replace")
 
 
-def define(src, name):
-    m = re.search(r"^#define\s+%s\s+(\d+)" % re.escape(name), src, re.M)
+def evaluate(expr, dw):
+    """Evaluate a C constant expression that may mention DIST_WORDS."""
+    expr = expr.replace("DIST_WORDS", str(dw))
+    assert re.fullmatch(r"[\d\s()+*/-]+", expr), "unexpected tokens: %r" % expr
+    return eval(expr)
+
+
+def define_expr(src, name):
+    m = re.search(r"^#define\s+%s\s+(.+?)\s*(?://.*)?$" % re.escape(name), src, re.M)
     assert m, "no #define %s" % name
-    return int(m.group(1))
+    return m.group(1).strip()
 
 
-def check_item_layout():
+def active_block(src, dw):
+    """Strip the inactive arm of every `#if DIST_WORDS == 4` / #else block."""
+    out, state = [], []
+    for line in src.split("\n"):
+        st = line.strip()
+        if st.startswith("#if DIST_WORDS == 4"):
+            state.append(dw == 4)
+            continue
+        if state and st == "#else":
+            state[-1] = not state[-1]
+            continue
+        if state and st == "#endif":
+            state.pop()
+            continue
+        if all(state):
+            out.append(line)
+    return "\n".join(out)
+
+
+def check_item_layout(dw):
     """GPU DP output: OutputDP writer vs GPUEngine.cu reader."""
     eng_h = read("GPU/GPUEngine.h")
-    item_size = define(eng_h, "ITEM_SIZE")
-    item32 = item_size // 4
+    item32 = evaluate(define_expr(eng_h, "ITEM_SIZE32"), dw)
+    item_size = evaluate(define_expr(eng_h, "ITEM_SIZE").replace("ITEM_SIZE32", str(item32)), dw)
 
-    # x[4 u64] + d[4 u64] + kIdx[1 u64]
-    assert item_size == (4 + 4 + 1) * 8 == 72, item_size
+    # x[4 u64] + d[dw u64] + kIdx[1 u64]
+    assert item_size == (4 + dw + 1) * 8, (dw, item_size)
+    assert item32 == item_size // 4
 
-    math_h = read("GPU/GPUMath.h")
+    math_h = active_block(read("GPU/GPUMath.h"), dw)
+    # inline DP_EXTRA_DIST_WORDS so the writer reads as one flat list
+    m = re.search(r"#define DP_EXTRA_DIST_WORDS\(d\)(.*?)\n#(?:else|endif)",
+                  read("GPU/GPUMath.h"), re.S)
+    extra = m.group(1) if (m and dw == 4) else ""
     body = math_h[math_h.index("#define OutputDP"):]
-    body = body[:body.index("\n}")]
-    slots = [(int(o), field, int(i))
-             for o, field, i in re.findall(
-                 r"out\[pos\*ITEM_SIZE32 \+ (\d+)\] = \(\(uint32_t \*\)(\w+)\)\[(\d+)\];",
-                 body)]
-    assert slots, "OutputDP body not parsed"
+    body = body[:body.index("\n}")].replace("DP_EXTRA_DIST_WORDS(d)", extra)
 
-    # Every uint32 of the item is written exactly once, contiguous from 1.
-    written = [s[0] for s in slots]
-    assert written == list(range(1, item32 + 1)), \
-        "OutputDP writes %s, expected 1..%d" % (written, item32)
+    slots = []
+    for off, field, idx in re.findall(
+            r"out\[pos\*ITEM_SIZE32 \+ ([^\]]+)\] = \(\(uint32_t \*\)(\w+)\)\[(\d+)\];", body):
+        slots.append((evaluate(off, dw), field, int(idx)))
 
-    # Each source field is written low word first, no gaps.
-    for field, count in (("x", 8), ("d", 8), ("idx", 2)):
-        idxs = [i for _, f, i in slots if f == field]
-        assert idxs == list(range(count)), "%s writes %s" % (field, idxs)
+    # every uint32 of the item written exactly once; slot 0 is the found-counter
+    written = sorted(s[0] for s in slots)
+    assert len(written) == len(set(written)), (dw, "duplicate slot write", written)
+    assert written == list(range(1, item32 + 1)), (dw, written, item32)
 
-    # Reader side: itemPtr = out + i*ITEM_SIZE32 + 1, so writer slot N -> itemPtr[N-1].
-    eng_cu = read("GPU/GPUEngine.cu")
-    x_off = [int(n) for n in re.findall(r"it\.x\.bits64\[(\d)\] = x\[\d\];", eng_cu)]
-    d_base = int(re.search(r"uint64_t \*d = \(uint64_t \*\)\(itemPtr \+ (\d+)\);",
-                           eng_cu).group(1))
-    d_words = re.findall(r"it\.d\.bits64\[(\d)\] = d\[(\d)\];", eng_cu)
-    k_off = int(re.search(r"it\.kIdx = \*\(\(uint64_t\*\)\(itemPtr \+ (\d+)\)\);",
-                          eng_cu).group(1))
+    # fields land contiguously and in order
+    for field, base, count in (("x", 1, 8), ("d", 9, 2 * dw), ("idx", 9 + 2 * dw, 2)):
+        got = sorted((o, i) for o, f, i in slots if f == field)
+        assert got == [(base + i, i) for i in range(count)], (dw, field, got)
 
-    assert x_off == [0, 1, 2, 3], x_off
-    assert d_base == 8, "d read at u32 offset %d, writer put it at 8" % d_base
-    assert [(int(a), int(b)) for a, b in d_words] == [(0, 0), (1, 1), (2, 2), (3, 3)], \
-        "distance words not read 1:1: %s" % d_words
-    assert k_off == 16, "kIdx read at u32 %d, writer put it at 16" % k_off
-    # kIdx is the last 2 u32 of the item
-    assert k_off + 2 == item32, "kIdx at %d + 2 != item32 %d" % (k_off, item32)
+    # reader side must use the same offsets
+    cu = read("GPU/GPUEngine.cu")
+    assert "uint64_t *x = (uint64_t *)itemPtr;" in cu
+    assert "uint64_t *d = (uint64_t *)(itemPtr + 8);" in cu, "d must be read at +8"
+    m = re.search(r"it\.kIdx = \*\(\(uint64_t\*\)\(itemPtr \+ ([^)]+)\)\);", cu)
+    assert m and evaluate(m.group(1), dw) == 8 + 2 * dw, (dw, m and m.group(1))
     return item_size
 
 
-def check_kangaroo_slots():
-    """Device kangaroo record: every slot used must fit inside KSIZE."""
+def check_kangaroo_slots(dw):
+    """Device kangaroo record: px[4] py[4] dist[dw] (+lastJump) must fit KSIZE."""
     eng_h = read("GPU/GPUEngine.h")
-    ksize_sym = int(re.search(r"#ifdef USE_SYMMETRY\s*\n#define KSIZE (\d+)", eng_h).group(1))
-    ksize = int(re.search(r"#else\s*\n#define KSIZE (\d+)", eng_h).group(1))
-    assert (ksize, ksize_sym) == (12, 13), (ksize, ksize_sym)
+    ks = re.findall(r"#define KSIZE\s+(.+)", eng_h)
+    assert len(ks) == 2, ks
+    ksize_sym, ksize = (evaluate(k.strip(), dw) for k in ks)
+    assert ksize == 8 + dw, (dw, ksize)
+    assert ksize_sym == ksize + 1, (dw, ksize_sym)
 
-    math_h = read("GPU/GPUMath.h")
-    used = {int(n) for n in re.findall(r"IDX \+ (\d+) \* blockDim\.x \+ stride", math_h)}
-    assert used == set(range(13)), "device slots used: %s" % sorted(used)
-    assert max(used) < ksize_sym
+    math_h = active_block(read("GPU/GPUMath.h"), dw)
+    used = set()
+    for expr in re.findall(r"\(a\)\[IDX \+ ([^*]+)\* blockDim\.x \+ stride\]", math_h):
+        used.add(evaluate(expr.strip(), dw))
+    assert used, "no kangaroo slot accesses found"
+    assert max(used) < ksize_sym, (dw, sorted(used), ksize_sym)
+    assert used >= set(range(0, 8 + dw)), (dw, sorted(used))
 
-    # Non-symmetry build must not touch slot 12 (that is the lastJump word).
-    non_sym = re.sub(r"#ifdef USE_SYMMETRY.*?#endif", "", math_h, flags=re.S)
-    used_ns = {int(n) for n in re.findall(r"IDX \+ (\d+) \* blockDim\.x \+ stride", non_sym)}
-    assert max(used_ns) < ksize, "non-symmetry uses slot %d, KSIZE=%d" % (max(used_ns), ksize)
-
-    # Host side writes the same slots.
-    eng_cu = read("GPU/GPUEngine.cu")
-    host = {int(n) for n in re.findall(r"t \+ (\d+) \* nbThreadPerGroup", eng_cu)}
-    assert host == set(range(13)), "host slots: %s" % sorted(host)
-
-    # dist is 4 words everywhere it is declared.
-    assert "dist[GPU_GRP_SIZE][2]" not in math_h
-    assert "dist[GPU_GRP_SIZE][2]" not in read("GPU/GPUCompute.h")
-    # and accumulated with the 4-word carry chain
-    assert "Add256(dist[g],jD[jmp]);" in read("GPU/GPUCompute.h")
-    assert "jD[NB_JUMP][4]" in math_h
+    cu = active_block(read("GPU/GPUEngine.cu"), dw)
+    host = set()
+    for expr in re.findall(r"t \+ ([^*]+)\* nbThreadPerGroup", cu):
+        host.add(evaluate(expr.strip(), dw))
+    assert max(host) < ksize_sym, (dw, sorted(host), ksize_sym)
     return ksize
 
 
-def check_add256():
-    """Carry must chain through all four words: add.cc / addc.cc / addc.cc / addc."""
+def check_add_carry(dw):
+    """AddDist must select a carry chain covering exactly DIST_WORDS words."""
     math_h = read("GPU/GPUMath.h")
-    body = math_h[math_h.index("#define Add256"):]
-    body = body[:body.index("(a)[3]);}") + len("(a)[3]);}")]
-    ops = re.findall(r"(UADDO1|UADDC1|UADD1)\(\(r\)\[(\d)\], \(a\)\[(\d)\]\)", body)
-    assert [o[0] for o in ops] == ["UADDO1", "UADDC1", "UADDC1", "UADD1"], ops
-    assert [o[1] for o in ops] == list("0123") and [o[2] for o in ops] == list("0123")
+    sel = re.search(r"#if DIST_WORDS == 4\s*\n#define AddDist\(r,a\) (\w+)\(r,a\)\s*\n"
+                    r"#else\s*\n#define AddDist\(r,a\) (\w+)\(r,a\)", math_h)
+    assert sel, "AddDist selector missing"
+    name = sel.group(1) if dw == 4 else sel.group(2)
+    body = math_h[math_h.index("#define %s(r,a)" % name):]
+    body = body[:body.index("}")]
+    ops = re.findall(r"(UADDO1|UADDC1|UADD1)\(\(r\)\[(\d+)\], \(a\)\[(\d+)\]\)", body)
+    assert len(ops) == dw, (dw, name, ops)
+    assert [int(o[1]) for o in ops] == list(range(dw))
+    assert [int(o[2]) for o in ops] == list(range(dw))
+    # carry must start, chain, then terminate
+    assert ops[0][0] == "UADDO1" and ops[-1][0] == "UADD1", ops
+    assert all(o[0] == "UADDC1" for o in ops[1:-1]), ops
+
+    comp = read("GPU/GPUCompute.h")
+    assert "AddDist(dist[g],jD[jmp]);" in comp
+    assert "uint64_t dist[GPU_GRP_SIZE][DIST_WORDS];" in comp
+    assert "jD[NB_JUMP][DIST_WORDS]" in math_h
 
 
-def check_wire():
-    """DP packet and kangaroo block sizes agree with their runtime assertions."""
-    kh = read("Kangaroo.h")
-    dp = kh[kh.index("// DP transfered over the network"):]
-    dp = dp[:dp.index("} DP;")]
-    assert "int128_t x;" in dp and "int256_t d;" in dp, dp
-    dp_size = 4 + 4 + 16 + 32                     # kIdx + h + x + d
-    assert dp_size == 56
+def check_host_sizes(dw):
+    ht = read("HashTable.h")
+    entry = evaluate(define_expr(ht, "ENTRY_SIZE"), dw)
+    assert entry == 16 + 8 * dw, (dw, entry)
+    assert evaluate(define_expr(ht, "DIST_MAG_BITS"), dw) == 64 * dw - 2
 
     net = read("Network.cpp")
-    asserted = int(re.search(r"if\(sizeof\(DP\) != (\d+)\)", net).group(1))
-    assert asserted == dp_size, "runtime check says %d, struct is %d" % (asserted, dp_size)
+    m = re.search(r"if\(sizeof\(DP\) != \(int\)\((.+?)\)\) \{", net)
+    assert m, "DP size assertion missing"
+    dp_size = evaluate(m.group(1), dw)
+    assert dp_size == 8 + 16 + 8 * dw, (dw, dp_size)
 
-    # All four distance words are packed into the outgoing DP.
-    packed = re.findall(r"dp\[i\]\.d\.i64\[(\d)\] = D\.i64\[(\d)\];", net)
-    assert [(int(a), int(b)) for a, b in packed] == [(0, 0), (1, 1), (2, 2), (3, 3)], packed
+    # kangaroo blocks sized from the type, not a literal
+    assert net.count("nbK * (8*DIST_WORDS),ntimeout") == 4
+    assert "memcpy(&KBuff[k],&kangs[pos],sizeof(dist_t));" in net
+    assert "kangs.size()*(8*DIST_WORDS) + 16" in read("Backup.cpp")
+    return entry, dp_size
 
-    # Kangaroo block: 32 bytes per kangaroo on every path, none left at 16.
-    assert "int128_t* KBuff" not in net and "int128_t *KBuff" not in net
-    # Declaration, cast and allocation size must all agree -- a stale cast here
-    # is a type error the eye slides right over.
-    allocs = re.findall(r"KBuff = \((\w+) ?\*\)malloc\(KANG_PER_BLOCK ?\* ?sizeof\((\w+)\)\)", net)
-    assert len(allocs) == 4, allocs
-    assert all(c == "int256_t" and t == "int256_t" for c, t in allocs), allocs
-    for pat in (r"::fread\(&KBuff\[k\],(\d+),1,f\);",
-                r"::fwrite\(&KBuff\[k\],(\d+),1,f\);",
-                r"memcpy\(&KBuff\[k\],&kangs\[pos\],(\d+)\);"):
-        sizes = re.findall(pat, net)
-        assert sizes and all(s == "32" for s in sizes), (pat, sizes)
-    pkt = re.findall(r"KBuff,nbK \* (\d+),ntimeout", net)
-    assert pkt and all(s == "32" for s in pkt), pkt
 
-    # Checksum must cover all four words wherever it is computed.
-    blocks = re.findall(r"K\.SetInt32\(0\);(.*?)checkSum\.Add\(&K\);", net, re.S)
-    assert blocks, "no checksum blocks found"
-    for b in blocks:
-        got = sorted(int(n) for n in re.findall(r"K\.bits64\[(\d)\] = KBuff", b))
-        assert got == [0, 1, 2, 3], "checksum covers words %s" % got
-
-    # The checksum accumulator is a 5-word Int but only 32 bytes go on the wire,
-    # and the distance now carries flags at b254/b255, so a herd overflows past
-    # 256 bits. Both sides must truncate or every transfer fails its checksum.
+def check_checksum_truncation():
+    """Only 32 bytes go on the wire; the flags push a herd past 2^256."""
+    net = read("Network.cpp")
     sends = len(re.findall(r'PUT\("check[Ss]um",\w+(?:->clientSock)?,checkSum\.bits64,32', net))
     compares = len(re.findall(r"if\(!K\.IsEqual\(&checkSum\)\)", net))
     truncs = len(re.findall(r"checkSum\.bits64\[4\] = 0;", net))
@@ -162,61 +174,55 @@ def check_wire():
     for m in re.finditer(r"checkSum\.bits64\[4\] = 0;(.{0,400})", net, re.S):
         assert ("IsEqual(&checkSum)" in m.group(1)
                 or "checkSum.bits64,32" in m.group(1)), "truncation not before use"
-
-    assert "kangs.size()*32 + 16" in read("Backup.cpp")
-    return dp_size, len(blocks)
-
-
-def check_entry():
-    ht = read("HashTable.h")
-    assert define(ht, "ENTRY_SIZE") == 16 + 32 == 48
-    assert define(ht, "MAX_INTERVAL_BITS") == 253
-    assert "int256_t  d;" in ht
-    # Every ENTRY-sized transfer goes through ENTRY_SIZE, and the two halves of
-    # an ENTRY are read/written at their own widths. Bare 32s elsewhere in these
-    # files are 256-bit Int header fields (range start/end, key x/y) -- correct
-    # as-is, so this checks the ENTRY sites specifically rather than banning 32.
-    htc = read("HashTable.cpp")
-    assert "::fread(items+i,ENTRY_SIZE,1,f);" in read("Check.cpp")
-    for pat in (r"::fread\(&e1,ENTRY_SIZE,1,f1\)", r"::fread\(&e2,ENTRY_SIZE,1,f2\)",
-                r"::fwrite\(output,ENTRY_SIZE,nbd,fd\)",
-                r"uint64_t hSize = \(uint64_t\)ENTRY_SIZE \* E\[h\]\.nbItem;"):
-        assert re.search(pat, htc), pat
-    assert len(re.findall(r"memcpy\(output ?\+ ?nbd,&e\d,ENTRY_SIZE\)", htc)) == 5
-    for half, width in (("x", "int128_t"), ("d", "int256_t")):
-        assert ("fwrite(&(E[h].items[i]->%s),sizeof(%s),1,f)" % (half, width)) in htc
-        assert ("fread(&(e->%s),sizeof(%s),1,f)" % (half, width)) in htc
-    # The truncating mask is gone; the guard replaced it.
-    htc = read("HashTable.cpp")
-    assert "exit(-1);" in htc and "0xC000000000000000ULL" in htc
+    loops = re.findall(r"for\(int w = 0; w < DIST_WORDS; w\+\+\)\s*\n\s*"
+                       r"K\.bits64\[w\] = KBuff\[k\]\.i64\[w\];", net)
+    assert len(loops) == 4, len(loops)
 
 
-def check_format_magic():
-    """Old files and old peers must be rejected, not misparsed."""
+def check_format_magics():
+    """A width mismatch must be refused by magic, never misparsed. The default
+    build must keep upstream's values so its work files stay compatible."""
     kh = read("Kangaroo.h")
-    for name, old in (("HEADW", "0xFA6A8001"), ("HEADK", "0xFA6A8002"),
-                      ("HEADKS", "0xFA6A8003")):
-        m = re.search(r"#define %s\s+(0x[0-9A-Fa-f]+)" % name, kh)
-        assert m and m.group(1).lower() != old.lower(), "%s not bumped" % name
+    m = re.search(r"#ifdef WIDE_DIST(.*?)#else(.*?)#endif", kh, re.S)
+    assert m, "work-file magics are not width-dependent"
+    wide, narrow = m.group(1), m.group(2)
+    for name, upstream in (("HEADW", "0xfa6a8001"), ("HEADK", "0xfa6a8002"),
+                           ("HEADKS", "0xfa6a8003")):
+        w = re.search(r"#define %s\s+(0x[0-9A-Fa-f]+)" % name, wide).group(1)
+        n = re.search(r"#define %s\s+(0x[0-9A-Fa-f]+)" % name, narrow).group(1)
+        assert n.lower() == upstream, (name, n, "default must match upstream")
+        assert w.lower() != n.lower(), (name, "wide magic must differ")
+
     net = read("Network.cpp")
-    m = re.search(r"#define SERVER_HEADER (0x[0-9A-Fa-f]+)", net)
-    assert m and m.group(1).lower() != "0x67deddc1", "SERVER_HEADER not bumped"
+    m = re.search(r"#ifdef WIDE_DIST\s*\n#define SERVER_HEADER (0x\w+)\s*\n#else\s*\n"
+                  r"#define SERVER_HEADER (0x\w+)", net)
+    assert m, "protocol magic is not width-dependent"
+    assert m.group(1) != m.group(2)
+    assert m.group(2).lower() == "0x67deddc1", (m.group(2), "default must match upstream")
 
 
-def main():
-    item = check_item_layout()
-    ksize = check_kangaroo_slots()
-    check_add256()
-    dp_size, nblocks = check_wire()
-    check_entry()
-    check_format_magic()
-    print("layout self-check OK")
-    print("  ENTRY      48 bytes (was 32)   x:16 d:32")
-    print("  ITEM       %d bytes (was 56)   x:32 d:32 kIdx:8" % item)
-    print("  KSIZE      %d words (was 10)   px:4 py:4 dist:4" % ksize)
-    print("  DP packet  %d bytes (was 40)" % dp_size)
-    print("  kangaroo   32 bytes (was 16),  %d checksum sites widened" % nblocks)
+def demo():
+    results = {}
+    for dw in WIDTHS:
+        item = check_item_layout(dw)
+        ksize = check_kangaroo_slots(dw)
+        check_add_carry(dw)
+        entry, dp = check_host_sizes(dw)
+        results[dw] = (entry, item, ksize, dp, 8 * dw)
+    check_checksum_truncation()
+    check_format_magics()
+
+    # the default width must reproduce upstream's layout exactly
+    assert results[2] == (32, 56, 10, 40, 16), results[2]
+    assert results[4] == (48, 72, 12, 56, 32), results[4]
+
+    print("layout self-check OK (both widths)")
+    print("  %-11s %8s %10s" % ("", "default", "WIDE_DIST"))
+    print("  %-11s %8d %10d" % ("DIST_WORDS", 2, 4))
+    for i, name in enumerate(("ENTRY", "ITEM", "KSIZE", "DP packet", "kangaroo")):
+        print("  %-11s %8d %10d" % (name, results[2][i], results[4][i]))
+    print("  default reproduces upstream exactly (ENTRY 32, ITEM 56, KSIZE 10, DP 40)")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    demo()

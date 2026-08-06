@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Model of the patched HashTable distance packing, to check the bit masks.
+"""Model of HashTable's distance packing, at both compiled widths.
 
-Mirrors HashTable::Convert / CalcDistAndType word-for-word so the masks can be
-exercised without a C++ toolchain. If this fails, the C++ is wrong too.
+Mirrors HashTable::Convert / CalcDistAndType mask-for-mask so the bit layout
+can be exercised without a C++ toolchain. If this fails, the C++ is wrong too.
+
+DIST_WORDS = 2 is the default build (126-bit magnitude, 125-bit intervals);
+DIST_WORDS = 4 is -DWIDE_DIST (254-bit magnitude, 253-bit intervals). The flags
+live in the top two bits of the top word at either width, which is what lets
+one implementation serve both.
 """
 
 N_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+NB64BLOCK = 5
 
-SIGN = 0x8000000000000000  # b255 of the 256-bit field, i.e. b63 of word 3
-TYPE = 0x4000000000000000  # b254
-MAG3 = 0x3FFFFFFFFFFFFFFF  # b253..b192
-
-MAX_INTERVAL_BITS = 253
+SIGN = 0x8000000000000000  # top bit of the top word
+TYPE = 0x4000000000000000
+MAG = 0x3FFFFFFFFFFFFFFF
 
 
 class Overflow(Exception):
@@ -22,94 +26,89 @@ def words(v, n):
     return [(v >> (64 * i)) & 0xFFFFFFFFFFFFFFFF for i in range(n)]
 
 
-def convert256(d_signed, type_bit):
-    """HashTable::Convert, 256-bit path. d_signed is the true signed distance."""
-    d = d_signed % N_ORDER                      # how Int holds it: mod n
-    w = words(d, 4)
+def max_interval_bits(dw):
+    return 253 if dw == 4 else 125
+
+
+def convert(d_signed, type_bit, dw):
+    """HashTable::Convert -- pack a signed distance into DIST_WORDS words."""
+    d = d_signed % N_ORDER
+    w = words(d, NB64BLOCK)
     sign = 0
     if w[3] > 0x7FFFFFFFFFFFFFFF:               # upper half means negative
         d = (-d_signed) % N_ORDER               # ModNegK1order
-        w = words(d, 4)
+        w = words(d, NB64BLOCK)
         sign = SIGN
-    if w[3] & 0xC000000000000000:
-        raise Overflow("distance exceeds 254 bits")
-    return [w[0], w[1], w[2], (w[3] & MAG3) | sign | (type_bit << 62)]
+    # magnitude must fit in DIST_MAG_BITS: flag bits clear in the top word,
+    # and nothing at all above it
+    if w[dw - 1] & (SIGN | TYPE) or any(w[i] for i in range(dw, NB64BLOCK)):
+        raise Overflow("distance exceeds %d bits" % (64 * dw - 2))
+    out = w[:dw]
+    out[dw - 1] = (out[dw - 1] & MAG) | sign | (type_bit << 62)
+    return out
 
 
-def calc_dist_and_type256(D):
-    """HashTable::CalcDistAndType, 256-bit path."""
-    ktype = 1 if (D[3] & TYPE) else 0
-    sign = 1 if (D[3] & SIGN) else 0
-    mag = D[0] | (D[1] << 64) | (D[2] << 128) | ((D[3] & MAG3) << 192)
+def calc_dist_and_type(D, dw):
+    """HashTable::CalcDistAndType -- unpack it again."""
+    ktype = 1 if (D[dw - 1] & TYPE) else 0
+    sign = 1 if (D[dw - 1] & SIGN) else 0
+    top = D[dw - 1] & MAG
+    mag = sum((top if i == dw - 1 else D[i]) << (64 * i) for i in range(dw))
     return ((-mag) % N_ORDER if sign else mag), ktype
 
 
-def convert128(d_signed, type_bit):
-    """Legacy 126-bit path, now guarded instead of truncating."""
-    d = d_signed % N_ORDER
-    w = words(d, 4)
-    sign = 0
-    if w[3] > 0x7FFFFFFFFFFFFFFF:
-        d = (-d_signed) % N_ORDER
-        w = words(d, 4)
-        sign = 1 << 63
-    if w[3] or w[2] or (w[1] & 0xC000000000000000):
-        raise Overflow("distance exceeds 126 bits")
-    return [w[0], (w[1] & 0x3FFFFFFFFFFFFFFF) | sign | (type_bit << 62)]
-
-
-def widen(D128):
-    """HashTable::Widen -- legacy 126-bit entry into the 254-bit field."""
-    return [D128[0], D128[1] & 0x3FFFFFFFFFFFFFFF, 0,
-            D128[1] & 0xC000000000000000]
-
-
-def roundtrip(d_signed, type_bit):
-    got, ktype = calc_dist_and_type256(convert256(d_signed, type_bit))
+def roundtrip(d_signed, type_bit, dw):
+    got, ktype = calc_dist_and_type(convert(d_signed, type_bit, dw), dw)
     return got == d_signed % N_ORDER and ktype == type_bit
 
 
 def demo():
-    # Puzzle #140 lives in [2^139, 2^140); walks overshoot, so exercise well past it.
-    for bits in (139, 140, 160, 200, 253):
-        for t in (0, 1):
-            v = (1 << bits) - 12345
-            assert roundtrip(v, t), (bits, t, "positive")
-            assert roundtrip(-v, t), (bits, t, "negative")
+    for dw in (2, 4):
+        limit = max_interval_bits(dw)
 
-    # Boundary: 253 bits of magnitude fits, 254 does not.
-    assert roundtrip((1 << 253) - 1, 0)
+        # Distances up to the documented interval limit survive, both signs,
+        # both kangaroo types.
+        for bits in (8, 64, 100, limit - 1, limit):
+            for t in (0, 1):
+                v = (1 << bits) - 12345
+                assert roundtrip(v, t, dw), (dw, bits, t, "positive")
+                assert roundtrip(-v, t, dw), (dw, bits, t, "negative")
+
+        # Exactly at the magnitude boundary is fine; one bit past is refused,
+        # never truncated. This is the whole point -- the original code masked
+        # here and returned a wrong key with no error.
+        mag_bits = 64 * dw - 2
+        assert roundtrip((1 << mag_bits) - 1, 0, dw), dw
+        try:
+            convert(1 << mag_bits, 0, dw)
+            raise AssertionError("dw=%d: %d-bit magnitude must be rejected"
+                                 % (dw, mag_bits + 1))
+        except Overflow:
+            pass
+
+        # Flags must never collide with magnitude bits.
+        assert SIGN | TYPE | MAG == 0xFFFFFFFFFFFFFFFF
+        assert SIGN & MAG == 0 and TYPE & MAG == 0 and SIGN & TYPE == 0
+
+        # ENTRY layout: 16-byte x + 8*DIST_WORDS distance, no padding.
+        assert 16 + 8 * dw == (32 if dw == 2 else 48)
+
+    # A puzzle #140 distance (2^139) is exactly what the default build must
+    # refuse and the wide build must accept.
     try:
-        convert256(1 << 254, 0)
-        raise AssertionError("254-bit magnitude must be rejected, not truncated")
+        convert(1 << 139, 0, 2)
+        raise AssertionError("default width must refuse a 139-bit distance")
     except Overflow:
         pass
+    assert roundtrip(1 << 139, 0, 4)
+    assert roundtrip(1 << 139, 1, 4)
 
-    # The original bug: a #140-scale distance silently lost its high bits in the
-    # 126-bit field. Now it raises instead of returning a wrong key.
-    try:
-        convert128(1 << 139, 0)
-        raise AssertionError("126-bit path must reject a 139-bit distance")
-    except Overflow:
-        pass
+    # Puzzle #120 (2^119) is inside both.
+    assert roundtrip(1 << 119, 0, 2) and roundtrip(1 << 119, 0, 4)
 
-    # Legacy entries still decode correctly once widened.
-    for v in (1, 42, (1 << 125) - 1):
-        for t in (0, 1):
-            got, ktype = calc_dist_and_type256(widen(convert128(v, t)))
-            assert got == v and ktype == t, (v, t, got, ktype)
-            got, ktype = calc_dist_and_type256(widen(convert128(-v, t)))
-            assert got == (-v) % N_ORDER and ktype == t, (v, t)
-
-    # Flags must never collide with magnitude bits.
-    assert SIGN | TYPE | MAG3 == 0xFFFFFFFFFFFFFFFF
-    assert SIGN & MAG3 == 0 and TYPE & MAG3 == 0 and SIGN & TYPE == 0
-
-    # ENTRY layout: 16-byte x + 32-byte d, no padding.
-    assert 16 + 32 == 48
-
-    print("distance-field self-check OK (254-bit magnitude, max interval %d bits)"
-          % MAX_INTERVAL_BITS)
+    print("distance-field self-check OK")
+    print("  default    magnitude 126 bits, intervals to 125")
+    print("  WIDE_DIST  magnitude 254 bits, intervals to 253")
 
 
 if __name__ == "__main__":
