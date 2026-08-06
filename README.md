@@ -239,6 +239,42 @@ the `{a..i}` alphabet and the same textarea, they are not the same kind of
 object as `RUN1`/`RUN2` — which is a structural fact about the puzzle, not a
 failed attempt.
 
+### The checkerboard reading, and why it stalls
+
+`dbbi`'s distribution is the one fact that survives everything above: two
+symbols carry 47% of the run (`b` 27.5%, `e` 19.8%) while the other seven decay.
+That is not what sums look like — it is what **escape digits** look like in a
+straddling checkerboard, which prefix 20 of 28 slots. Under `a=0…i=8` those two
+symbols are digits **1 and 4**, the exact escape pair of the solved phase 3.2.2
+checkerboard, recovered independently as the best-shaped of 72 parses
+(`dbbi.py`).
+
+The phase 3.2.2 alphabet does not fit `dbbi`, so the alphabet would differ —
+which reduces `dbbi` to a substitution over ~19 slots. That cannot be solved
+directly: 63 tokens is far too short, and a hill-climb on shuffled input
+out-scores the real run (`solve_sub.py`).
+
+So the alphabet has to come from a hint, as phase 3.2.2's did — it was built
+from *"A fubcd-king & oracle-queen, thingky mvps…"*, whose nonsense words supply
+21 distinct letters in 22 characters.
+
+`alphabets.py` sweeps the puzzle's plaintexts and the creator's hints for that
+signature: rare words with high distinct-letter ratio, clustered inside ordinary
+prose. It validates by independently recovering `['fubcd', 'thingky', 'mvps']`
+from the phase 3.2 plaintext, then finds **exactly one such cluster in the whole
+corpus — that same known one.** The only other clusters are `ado shown` (7
+distinct letters) and `aes cbc` (5), against the ~21 an alphabet requires.
+
+**No second alphabet hint exists in any text we possess.** Combined with the
+creator's statement that yin-yang is an unreached phase, the likely reading is
+that `dbbi`'s alphabet hint lives there. `dbbi` is blocked by missing input, not
+by insufficient analysis.
+
+(A first version of this detector scored whole phrases by letter diversity and
+FAILED its own control — the real sentence scores 0.333, because the ordinary
+English around the nonsense words dilutes it. Kept as a caution: a sweep that
+cannot find its known positive proves nothing.)
+
 Also eliminated in passing: `dbbi` read as a literal "matrix sum list"
 (`dbbi2.py` — both 7×13 rectangles, row/column sums, row- and column-major fill,
 a1z26); and each symbol in turn standing in for the missing zero
