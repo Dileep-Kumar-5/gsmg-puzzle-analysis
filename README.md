@@ -239,6 +239,44 @@ the `{a..i}` alphabet and the same textarea, they are not the same kind of
 object as `RUN1`/`RUN2` — which is a structural fact about the puzzle, not a
 failed attempt.
 
+### faed is a payload, not a cipher of text
+
+`faed` fails every classical test — and the reason is now measurable.
+
+Chi-square on its symbol frequencies is 43.7 on 8 df (p<0.001), but **69% of
+that comes from a single symbol**: `g` at 107 against 63.3 expected. Removing it
+is decisive:
+
+```
+drop 'g'            chi2 10.8 on 7 df    UNIFORM (p ~ 0.15)
+drop any other      chi2 39.0 - 43.7     still highly skewed
+```
+
+`g` is the only symbol whose removal leaves the rest uniform, and the separation
+is not marginal. So `faed` is **eight uniform symbols plus a ninth**, i.e. 463
+symbols of maximum-entropy data — about 174 bytes — with 107 `g`s interleaved.
+
+Uniform means no structure to find. That is why the IoC sits at 0.1181, why no
+period appears at any lag 1–40, why there are no repeated 6-grams, and why
+fractionation, transposition and substitution all fail. **`faed` is encrypted or
+compressed payload, not an enciphered message.**
+
+What the `g`s are is still open, but several readings are closed
+(`nulls.py`, `gmask.py`, `fraction.py`):
+
+| reading | result |
+|---|---|
+| positions are prime (per the creator's hint) | 24/107 prime = 22.4% vs 18.4% by chance |
+| positions carry a bit-mask payload | mask bytes printable 0.24; no key |
+| deliberately placed nulls | gaps are geometric (28,16,11,10,7,…) = random placement |
+| escape prefix, hex-style | 17 tokens, chi2 278.6 — nowhere near uniform |
+| base-8 reading of the remainder | best lowercase ratio 0.201 |
+| fractionation + transposition (ADFGVX family) | control ceiling **beats** best result |
+
+The consequence matters for the whole map: if `faed` is payload, it needs a key
+like the Cosmic blob does. It is not a layer waiting to be read cleverly — it
+sits *inside* the dependency cycle rather than offering a way out of it.
+
 ### The checkerboard reading, and why it stalls
 
 `dbbi`'s distribution is the one fact that survives everything above: two
