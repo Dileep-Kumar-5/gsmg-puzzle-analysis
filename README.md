@@ -301,6 +301,28 @@ exactly that. And the output is left-padded to fixed width, because
 `format(n,'x')` drops leading zeros and would otherwise make a given offset mean
 something different in each mapping.
 
+### Nor is it an interleaving
+
+Every test above transforms `faed`'s *values*. Uniformity is a property of the
+sequence as read, though — an interleaving of two streams looks uniform in
+aggregate while its components need not be. `reorder.py` tests the ORDER:
+reversed, read down columns at every divisor width, and every stride/offset
+substream for k up to 15.
+
+```
+best real   digraph-IoC 0.02769   (stride 13 offset 4)
+control     digraph-IoC 0.03077   (stride 14 offset 6)   <- control WINS
+```
+
+No component is structured. `faed` is not an interleaving.
+
+*Method note.* The first version of this test ranked on chi-square, which
+measures the **multiset** and is therefore identical for every permutation of a
+run — reversal and column-reads scored exactly 43.7 by construction, and the
+statistic could not see order at all. Only the strides (subsets, not
+permutations) were meaningfully tested. Ranking now uses adjacent-pair
+repetition, which is order-sensitive.
+
 ### Nor is it a container
 
 If `faed` were a container rather than raw bytes it should announce itself —
