@@ -301,6 +301,32 @@ exactly that. And the output is left-padded to fixed width, because
 `format(n,'x')` drops leading zeros and would otherwise make a given offset mean
 something different in each mapping.
 
+### Nor is it a container
+
+If `faed` were a container rather than raw bytes it should announce itself —
+every other stage of this puzzle used openssl base64 blobs, which begin
+`Salted__`. `container.py` sweeps every mapping and applies five tests that
+need no key: known magics, printable fraction, base64/hex charset,
+zlib-compressibility, and long zero runs.
+
+```
+control (the real SalPhaseIon blob) -> "openssl salted blob magic at offset 0"
+
+faed minus 'g', base 8,  40,320 mappings -> 0 signatures
+faed whole,     base 9, 362,880 mappings -> 0 signatures
+```
+
+So `faed` is raw high-entropy bytes with no self-describing structure. Together
+with the exhausted key search and the exhausted text search, it can only be
+interpreted with external knowledge — a key, or knowing what it represents.
+
+*Method note.* The first version of this detector reported 215 "hits", all of
+them 2-byte zlib headers at arbitrary offsets. Measured on real random data, a
+2-byte magic appears in a 174-byte string 0.7% of the time, predicting ~298
+hits across 40,320 mappings — so 215 was noise, not signal. Magics now count
+only at offset 0, or anywhere if at least 4 bytes long. This is the same
+short-signature trap already fixed once in `stego.py`.
+
 A note on a wrong turn: the search was first restricted to 16-byte-aligned
 offsets on the reasoning that "a key would sit at a byte boundary." That is
 wrong here. Converting a base-9 digit string to binary does not respect byte
