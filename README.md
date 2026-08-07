@@ -277,6 +277,37 @@ The consequence matters for the whole map: if `faed` is payload, it needs a key
 like the Cosmic blob does. It is not a layer waiting to be read cleverly — it
 sits *inside* the dependency cycle rather than offering a way out of it.
 
+### Is the key simply sitting in them? No — exhausted
+
+Uniform high-entropy data is exactly what a 32-byte private key looks like, so
+`faed`'s flatness is consistent with a key hiding in it rather than evidence
+against one. That deserved a real check rather than a shrug.
+
+`oracle_aligned.py` and `oracle_full.py` run every base-9 symbol mapping against
+the verified on-chain public key:
+
+| run | coverage | checks | result |
+|---|---|---|---|
+| `dbbi` | **all** 6 windows × 362,880 mappings | 2,177,280 | no match |
+| `faed` | **all** 195 windows × 362,880 mappings | 70,761,600 | no match |
+
+**73M elliptic-curve operations. Complete coverage.** The prize key is not
+present, in the clear, in any base-9 decoding of either run.
+
+Two details that matter for anyone re-running this. Byte width is computed from
+`(9**n - 1).bit_length()`, not estimated — 91 base-9 digits need **37** bytes,
+where a rounded `91*log2(9)/8` gives 36, and the first attempt crashed on
+exactly that. And the output is left-padded to fixed width, because
+`format(n,'x')` drops leading zeros and would otherwise make a given offset mean
+something different in each mapping.
+
+A note on a wrong turn: the search was first restricted to 16-byte-aligned
+offsets on the reasoning that "a key would sit at a byte boundary." That is
+wrong here. Converting a base-9 digit string to binary does not respect byte
+boundaries at all — where a key lands depends on the total digit count, which is
+arbitrary. Aligned offsets were never the privileged case, so the full 195 were
+swept.
+
 ### The checkerboard reading, and why it stalls
 
 `dbbi`'s distribution is the one fact that survives everything above: two
