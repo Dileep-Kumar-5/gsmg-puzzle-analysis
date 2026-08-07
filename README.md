@@ -339,6 +339,38 @@ creator's statement that yin-yang is an unreached phase, the likely reading is
 that `dbbi`'s alphabet hint lives there. `dbbi` is blocked by missing input, not
 by insufficient analysis.
 
+#### Nor is its plaintext anything we have seen
+
+A substitution does not have to be recovered statistically if the plaintext can
+be guessed, and this puzzle reuses its own vocabulary constantly. A checkerboard
+mapping is **bijective** — each slot decodes to one letter, each letter has one
+code — so a candidate plaintext can be tested by consistency rather than by any
+score a control could fool. A wrong guess dies on its first collision.
+
+`crib.py` tests every window of every puzzle plaintext, plus token
+concatenations, against all 36 escape pairs:
+
+```
+23,406 candidates survived length and alphabet-size filters
+     0 passed the bijection test
+```
+
+`crib_control.py` validates the procedure on the solved phase 3.2.2, whose
+plaintext sits in the same corpus:
+
+```
+direct bijection on the known plaintext : PASS, 21/21 pairs match the
+                                          published alphabet
+blind sweep : 2,328 candidates, exactly 1 consistent -> the true plaintext
+```
+
+Sensitivity and specificity both confirmed — it finds a real answer and produces
+zero false positives. So the zero on `dbbi` means what it says.
+
+`dbbi`'s plaintext is **not** a rearrangement of anything the puzzle has shown
+us. It is novel text, readable only with its alphabet, which exists nowhere in
+the corpus.
+
 (A first version of this detector scored whole phrases by letter diversity and
 FAILED its own control — the real sentence scores 0.333, because the ordinary
 English around the nonsense words dilutes it. Kept as a caution: a sweep that
